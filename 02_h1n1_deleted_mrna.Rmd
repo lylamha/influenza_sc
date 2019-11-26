@@ -1,0 +1,300 @@
+---
+title: "Analysis of deleted mRNAs in H1N1"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, message=FALSE}
+library(data.table)
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+```
+
+# Get data
+
+Analysing only the pathogen transcript we need to filter out cells having too 
+few reads mapping to h1n1 genome. Take only samples where number of mapped reads
+on viral genome is more than 10,000 reads. 71 cells are remaining. 
+Small insert sizes correspond to insert sizes smaller than 1000 bp.
+Large insert sizes correspond to insert sizes greater or equal 1000 bp.
+We count insert sizes only on H1N1 segments 1,2,3.
+
+```{r}
+isize_counts <- read.csv("data/insert_sizes_influenza_counts.csv")
+dim(isize_counts)
+```
+
+
+```{r}
+head(isize_counts)
+```
+
+```{r}
+sample_info <- read.csv("data/sample_info_afterQC.csv")
+```
+
+
+```{r}
+# color coding for plots
+PFU_class_colors <- c("#00BFC4", "#F8766D")
+names(PFU_class_colors) <- c("low", "high")
+isize_counts$PFU_class <- factor(isize_counts$PFU_class, levels = c("low", "high"))
+table(isize_counts$PFU_class)
+```
+
+
+### Compare log2 ratio of small and large insertion sizes in high vs low PFU cells
+
+
+```{r}
+# add pseudo count to ratio to avoid undefined values
+w_out <- wilcox.test(log2(ratio + 1e-7) ~ PFU_class, data = isize_counts)
+w_out
+```
+
+
+```{r}
+isize_counts$PFU_class <- factor(isize_counts$PFU_class, levels=c("low", "high"))
+```
+
+
+```{r}
+w_out  <- wilcox.test(log2(ratio + 1e-7) ~ PFU_class, data = isize_counts)
+nCells <- table(isize_counts$PFU_class)
+xlabels <- paste0(c("low\nn=", "high\nn="), nCells)
+
+ggplot(isize_counts, aes(PFU_class, log2(ratio + 1e-7))) +
+  geom_violin(aes(fill = PFU_class, col = PFU_class), alpha = .7) +
+  geom_boxplot(width = 0.05, alpha = 0.7) +
+  scale_color_manual(values=PFU_class_colors) +
+  scale_fill_manual(values=PFU_class_colors) +
+  theme_bw() +
+  ylab("log2 ((# large insert sizes / # small insert sizes) + 1e-7) ") +
+  annotate("text", x = 1.5, y = -20,
+           label = paste0("wilcox test\np-value = ", round(w_out$p.value,2))) +
+  scale_x_discrete(labels=xlabels)
+```
+
+```{r}
+# isize_counts$DIPs encodes if we could find any chimeric read in that sample
+ggplot(isize_counts, aes(x=num_small_isize, y=num_large_isize)) +
+  geom_smooth(method='lm', formula = y ~ x, aes(col=PFU_class), se=F, lwd=0.5) +
+  geom_point(aes(col = PFU_class, shape = factor(DIPs)), size = 3) +
+  scale_shape(solid = T, name="chimeric read found") +
+  theme_bw()+
+  scale_y_log10() +
+  scale_x_log10() +
+  scale_color_manual(values=PFU_class_colors) +
+  ylab("Number of large insert sizes\n(> 1000 bp)") +
+  xlab("Number of small insert sizes\n(<= 1000 bp)") +
+  theme(text = element_text(size=15))
+
+```
+
+
+### viral mRNA content in the presence of DI RNA (any read >= 1000 bp on seg 1, 2, 3)
+
+```{r}
+dips.df <- data.frame(sample = isize_counts$sample,
+                      DI_by_isize = isize_counts$num_large_isize > 0)
+
+dips.df$DI_by_isize <- ifelse(dips.df$DI_by_isize, "DI_present", "DI_absent")
+  
+tmp <- merge(subset(sample_info, select=c(sample, 
+                                          PFU_class,
+                                          total_H1N1)),
+             dips.df, by="sample")
+tmp$PFU_class <- factor(tmp$PFU_class, levels=c("low", "high"))
+ggplot(tmp, aes(x = PFU_class, y = total_H1N1)) +
+  geom_violin(aes(fill=PFU_class, col=PFU_class), alpha=.4) +
+  geom_boxplot(width=.1) +
+  scale_color_manual(values=PFU_class_colors) +
+  scale_fill_manual(values=PFU_class_colors) +
+  facet_grid(~ DI_by_isize, scales = "free_y") +
+  theme_bw() +
+  theme(text = element_text(size=20)) +
+  ylab("total H1N1 mRNA content (TPM)")
+```
+
+
+```{r}
+# DI present: low vs high
+wilcox.test(total_H1N1 ~ PFU_class, subset(tmp, DI_by_isize == "DI_present"))
+# DI absent: low vs high
+wilcox.test(total_H1N1 ~ PFU_class, subset(tmp, DI_by_isize == "DI_absent"))
+# high PFU cells: DI absent vs DI present
+wilcox.test(total_H1N1 ~ DI_by_isize, subset(tmp, PFU_class == "high"))
+# low PFU cells: DI absent vs DI present
+wilcox.test(total_H1N1 ~ DI_by_isize, subset(tmp, PFU_class == "low"))
+```
+
+```{r}
+### sample sizes in groups
+aggregate(sample ~ PFU_class + DI_by_isize, tmp , length)
+```
+
+# Chimeric reads to detect the deleted region
+
+### Loading the data
+
+Data contains parsed information (obtained by STAR) about chimeric junctions detected
+in H1N1 pre infection (seed virion), in H1N1 post infection (progeny virion) and
+H1N1 post infection in single cells.
+
+```{r}
+chim_dat <- fread("data/chim_junctions_h1n1.csv")
+head(chim_dat)
+```
+
+Please note: Locus of chimeric junctions can vary by a few base pairs
+Example: H1N1_seg3:351/1905 (+) and H1N1_seg3:1907/353 (-) are the same. Split locus cannot be assigned unambiguously
+since end fragment of first part is equal to start fragment of second part of the split read:
+GAAACCAAAGTTTCTACCAGATTT_GT_ [...] _GT_GGAGGAAAGTTCCATTGGGA (reference)
+GAAACCAAAGTTTCTACCAGATTT/GT/GGAGGAAAGTTCCATTGGGAAGGTC (read)
+
+
+```{r}
+chim_dat$infection <- factor(chim_dat$infection, levels = c("pre", "post", "post_sc"))
+table(chim_dat$infection)
+```
+
+
+We observe 16 different DI vRNAs before infection in the seed virus,
+141 different DI vRNAs (16 overlapping with the seed virion) were found in the progeny virions and 
+ 19 different DI vRNAs in single cells. 
+
+```{r}
+# subset for only pre and post infection samples (bulk) and H1N1_seg1/2/3
+ggplot(subset(chim_dat, chr_don != "H1N1_seg4" & infection %in% c("pre", "post")),
+       aes(distance, log10(cpm), col=chr_don, shape= infection, group = junctions)) +
+  geom_point() +
+  geom_line(linetype = "dotted") +
+  scale_shape_manual(values = c(1, 16)) +
+  scale_color_brewer(palette="Set2", name="H1N1 genes", labels=c("PB2", "PB1", "PA")) +
+  theme_bw() +
+  xlab("junction length") +
+  ggtitle("internal deletions found in pre and post H1N1 infection") # +
+
+```
+
+```{r}
+h1n1_segment_info <- data.frame(chr = c("H1N1_seg1",
+                                        "H1N1_seg2",
+                                        "H1N1_seg3",
+                                        "H1N1_seg4",
+                                        "H1N1_seg5",
+                                        "H1N1_seg6",
+                                        "H1N1_seg7",
+                                        "H1N1_seg8"),
+                                length = c(2341,
+                                           2341,
+                                           2233,
+                                           1778,
+                                           1565,
+                                           1413,
+                                           1027,
+                                           890))
+```
+
+
+```{r}
+chim_dat <- merge(chim_dat, h1n1_segment_info, by.x="chr_don", by.y="chr")
+chim_dat$DI_length   <- chim_dat$length - chim_dat$distance
+
+ggplot(subset(chim_dat, chr_don != "H1N1_seg4" & infection %in% c("pre", "post")),
+       aes(DI_length, log10(cpm), col=chr_don, shape= infection, group = junctions)) +
+  geom_point() +
+  geom_line(linetype = "dotted") +
+  scale_shape_manual(values = c(1, 16)) +
+  scale_color_brewer(palette="Set2", name="H1N1 genes", labels=c("PB2", "PB1", "PA")) +
+  theme_bw() +
+  xlab("inferred DI RNA length") +
+  ggtitle("DI RNAs found in pre and post H1N1 infection")
+```
+
+
+### Visualise breaking points on H1N1 segments
+
+
+```{r}
+source("scripts/process_chimeric_information.R")
+### parsing the junctions to get start and end points
+all_junctions_df <- data.frame()
+
+for (inf in levels(chim_dat$infection)) {
+  sub <- subset(chim_dat, subset = infection == inf)
+  df  <- split_junctions(sub$junctions)
+  df$infection <- inf
+  
+  all_junctions_df <- rbind(all_junctions_df, df)
+}
+
+```
+
+
+
+```{r}
+h1n1_segment123 <- subset(h1n1_segment_info, grepl("seg[123]", h1n1_segment_info$chr))
+
+dummy <- data.frame(start = h1n1_segment123$length, value = 0,
+                    chr = h1n1_segment123$chr,
+                    infection = "pre", stringsAsFactors=FALSE)
+
+junctions123 <- subset(all_junctions_df, grepl("seg[123]", all_junctions_df$chr))
+
+# mask duplicated entries
+junctions123$dup <- F
+junctions123$dup[duplicated(paste0(junctions123$junction_merged,
+                                   junctions123$infection))] <- T
+
+```
+
+
+```{r}
+### removing the duplicated entries
+junctions123_t <- subset(junctions123, !junctions123$dup)
+junctions123_t <- subset(junctions123_t, select=-dup)
+junctions123_t <- melt(junctions123_t, id.vars = c("chr", "junction_merged", "infection"))
+
+junctions123_t$y <- ifelse(junctions123_t$infection == "pre", -2e-4,
+                           ifelse(junctions123_t$infection == "post",
+                                  -3e-4,
+                                  -4e-4))
+junctions123_t$infection <- factor(junctions123_t$infection,
+                                   levels=c("post", "pre", "post_sc"))
+
+h1n1_genes <- list("H1N1_seg1" = "PB2",
+                   "H1N1_seg2" = "PB1",
+                   "H1N1_seg3" = "PA")
+
+h1n1_labeller <- function(variable, value) { return(h1n1_genes[value]) }
+
+ggplot(junctions123_t, aes(x=value, y=..density.., col=infection, fill = infection)) +
+  geom_jitter(aes(x=value, y=y, col=infection), height = 0.00001, alpha =.7) +
+  geom_density(alpha=0.2) +
+  geom_blank(aes(x=start, y =0), data=dummy) +
+  facet_wrap( ~ chr, ncol= 1, scales = "free_x", labeller = h1n1_labeller) +
+  theme_bw() +
+  scale_color_manual(values = c("#1f78b4", "#b2df8a", "#fb8072")) +
+  scale_fill_manual(values = c("#1f78b4", "#b2df8a", "#fb8072")) +
+  theme(panel.grid.major.y = element_line( size=0, color=NULL ),
+        panel.grid.minor.y = element_line( size=0, color=NULL ),
+        panel.grid.major.x = element_line( size=0, color=NULL ),
+        panel.grid.minor.x = element_line( size=0, color=NULL )) +
+  xlab("H1N1 position") +
+  ylab("density of breaking points")
+
+```
+
+

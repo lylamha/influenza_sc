@@ -1,0 +1,156 @@
+---
+title: "01_sc_analysis"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Notebook generating results for manuscript:
+Single-cell analysis uncovers a vast diversity in intracellular viral defective interfering RNA content affecting the large cell-to-cell heterogeneity in influenza A virus replication.
+It includes Comparison of host and pathogen expression
+
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+```
+
+### Reading files
+
+TPM (transcripts per million) counts of single cells passing through our quality filter as well as a sample annotation file are provided.
+First column of tpm represents gene ID (ENSEMBL).
+
+```{r}
+tpm <- read.csv("data/tpm_afterQC.csv", check.names = F)
+sample_info <- read.csv("data/sample_info_afterQC.csv", check.names = F)
+```
+
+```{r}
+# number of cells
+nrow(sample_info)
+```
+
+```{r}
+nCells <- table(sample_info$PFU_class)
+nCells
+```
+
+```{r}
+### color coding
+sample_info$PFU_class <- factor(sample_info$PFU_class, levels=c("low", "high"))
+PFU_class_colors <- c("#00BFC4", "#F8766D")
+names(PFU_class_colors) <- c("low", "high")
+```
+
+
+```{r, fig.width=6, height=4}
+ggplot(sample_info, aes(x = reorder(sample, PFU), y = PFU, fill = PFU_class)) +
+  geom_bar(stat = "identity") +
+  xlab("samples") + 
+  ylab("PFU (plaque-forming unit)") + 
+  ggtitle("Measured virus titer across single cells") +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+  theme_bw() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title = element_text(hjust = 0.5))  +
+  theme(text = element_text(size=14)) +
+  guides(fill="none") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+After quality control 86 single cells are left.
+
+
+### Exploring data
+
+```{r}
+tmp <- tpm
+tmp <- melt(tmp, id.vars = "gene")
+```
+
+```{r}
+tmp <- merge(tmp, subset(sample_info, select=c("sample", "PFU_class", "source", "infected")), by.x = "variable", by.y="sample")
+tmp$species <- ifelse(grepl("ENSCAF", tmp$gene), "host", "pathogen")
+```
+
+```{r}
+# nCells <- table(sample_info$PFU_class)
+```
+
+## Comparing viral and host transcription activity (single mRNA level)
+
+```{r}
+tmp <- subset(tmp, subset = value >= 1 & infected == "infected" & source == "single")
+dodge <- position_dodge(width = 1)
+ggplot(tmp, aes(x = PFU_class, y = value)) +
+  geom_violin(position = dodge, aes(fill = PFU_class, col=PFU_class),alpha=0.7) +
+  geom_boxplot(width=0.2, position = dodge, outlier.colour=NA, alpha=0.7) +
+  scale_y_log10() +
+  facet_grid(.~species) +
+  ylab("TPM") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(name = "PFU class", values=PFU_class_colors) +
+  scale_color_manual(guide=FALSE, values=PFU_class_colors) + 
+  scale_x_discrete(labels=c("low" = paste0("low\nn=", nCells["low"]),
+                            "high" = paste0("high\nn=", nCells["high"])))
+```
+
+#### Wilcoxon rank sum test between low and high PFU cells in viral transription activity (single viral mRNA)
+
+```{r}
+wilcox.test(value ~ PFU_class, subset(tmp, species == "pathogen"))
+```
+
+#### Wilcoxon rank sum test between low and high PFU cells in host transription activity (single host mRNA)
+
+```{r}
+
+wilcox.test(value ~ PFU_class, subset(tmp, species == "host"))
+```
+
+Both tests result in significant p-values.
+
+
+## Comparing viral and host transcription activity (total mRNA level)
+
+Also at the total mRNA content level the t-test (data is here normally distributed) results in significant p-values.
+
+```{r}
+tmp <- subset(sample_info, select=c(sample, total_cell, total_H1N1, PFU_class))
+tmp <- melt(tmp, id.vars=c("sample", "PFU_class"))
+tmp$variable <- ifelse(tmp$variable == "total_cell", "host", "pathogen")
+
+
+t_patho <- t.test(value ~ PFU_class, subset(tmp, variable == "pathogen"))$p.value
+t_host  <- t.test(value ~ PFU_class, subset(tmp, variable == "host"))$p.value
+
+
+# dodge <- position_dodge(width = 1)
+ggplot(tmp, aes(x = PFU_class, y = value)) +
+  geom_violin(aes(fill = PFU_class, col=PFU_class),alpha=0.7) +
+  geom_boxplot(width=0.2, outlier.colour=NA, alpha = 0.7) +
+  facet_grid(.~variable) +
+  ylab("total mRNA content") +
+  ggtitle("Host vs pathogen total mRNA content") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(name = "PFU class", labels=c("low", "high"), values=PFU_class_colors) +
+  scale_color_manual(guide=F, values=PFU_class_colors) +
+  scale_x_discrete(labels=c("low" = paste0("low\nn=", nCells["low"]),
+                            "high" = paste0("high\nn=", nCells["high"]))) +
+  labs(caption = paste0("t-test\np_pathogen = ", formatC(t_patho, format = "e", digits = 2),
+                        "\np_host = ", formatC(t_host, format = "e", digits = 2)))
+```
+
+
+Conclusion: high productive cells have a higher amount of viral transription activity than low productive cells.
